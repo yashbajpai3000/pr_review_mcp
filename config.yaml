@@ -1,0 +1,11 @@
+review_criteria:
+  - "Check for clear and concise variable names."
+  - "Ensure proper error handling and logging."
+  - "Verify code follows the project's style guidelines."
+  - "Identify potential security vulnerabilities."
+  - "Assess the efficiency of the code."
+  - "Confirm that new code is well-documented."
+  - "Look for opportunities to simplify the code."
+  - "Check for proper use of data structures."
+  - "Evaluate the test coverage for the changes."
+  - "Ensure changes are consistent with the overall architecture."

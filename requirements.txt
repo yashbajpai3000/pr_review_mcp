@@ -1,0 +1,13 @@
+# Python packages required for the GitHub PR Code Review System
+
+# 3rd party packages
+requests
+python-dotenv
+Flask
+PyGithub
+celery
+PyYAML
+jsonschema
+
+# Example usage:
+# pip install -r requirements.txt
