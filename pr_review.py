@@ -12,6 +12,9 @@ from jsonschema import validate, ValidationError
 from github import Github, GithubException
 from typing import List, Dict, Optional, Union
 from abc import ABC, abstractmethod
+import traceback
+import re
+import requests
 
 # Load environment variables
 load_dotenv()
@@ -58,7 +61,6 @@ config = load_config("config.yaml")  # Load config.yaml
 
 # GitHub Client
 class GitHubClient:
-    """封装了与 GitHub API 的交互"""
 
     def __init__(self, token: str):
         """
@@ -69,30 +71,119 @@ class GitHubClient:
         """
         self.github = Github(token)
         self.token = token # Store the token for later use
-
+        
     def get_pr_diff(self, owner: str, repo_name: str, pr_number: int) -> str:
-        """Fetches the diff for a pull request."""
+        """
+        Fetches the complete diff for all files in a pull request.
+        
+        Args:
+            owner: Repository owner
+            repo_name: Repository name
+            pr_number: Pull request number
+            
+        Returns:
+            Combined diff text for all files in the PR
+        """
         try:
             repo = self.github.get_repo(f"{owner}/{repo_name}")
             pr = repo.get_pull(pr_number)
-            return pr.get_files().raw_data[0].patch
+            
+            # Get all files from the PR
+            all_files = pr.get_files()
+            
+            # Combine diffs from all files
+            diffs = []
+            for file in all_files:
+                if file.patch:  # Some files might not have a patch (e.g., binary files)
+                    file_header = f"diff --git a/{file.filename} b/{file.filename}"
+                    diffs.append(f"{file_header}\n{file.patch}")
+            
+            combined_diff = "\n\n".join(diffs)
+            return combined_diff
         except GithubException as e:
-            logger.error(f"Error fetching PR diff: {e}")
+            logger.error(f"Error fetching PR diff: {traceback.format_exc()}")
+            raise
+
+    def get_file_diff(self, owner: str, repo_name: str, pr_number: int, file_path: str) -> str:
+        """
+        Fetches the diff for a specific file in a pull request.
+        
+        Args:
+            owner: Repository owner
+            repo_name: Repository name
+            pr_number: Pull request number
+            file_path: Path to the file
+            
+        Returns:
+            Diff text for the specified file
+        """
+        try:
+            repo = self.github.get_repo(f"{owner}/{repo_name}")
+            pr = repo.get_pull(pr_number)
+            
+            # Get all files from the PR
+            all_files = pr.get_files()
+            
+            # Find the specific file
+            for file in all_files:
+                if file.filename == file_path:
+                    return file.patch
+            
+            return ""  # File not found in PR
+        except GithubException as e:
+            logger.error(f"Error fetching file diff: {traceback.format_exc()}")
             raise
 
     def get_pr_files(self, owner: str, repo_name: str, pr_number: int) -> List[Dict]:
-        """Fetches the files changed in a pull request.  Returns a list of dicts."""
+        """
+        Fetches detailed information about files changed in a pull request.
+        
+        Returns:
+            A list of dicts with filename, status, and other metadata
+        """
         try:
             repo = self.github.get_repo(f"{owner}/{repo_name}")
             pr = repo.get_pull(pr_number)
             files = pr.get_files()
-            file_data = [{"filename": file.filename} for file in files]  # Extract filename
+            
+            file_data = []
+            for file in files:
+                data = {
+                    "filename": file.filename,
+                    "status": file.status,  # Added, modified, removed, etc.
+                    "additions": file.additions,
+                    "deletions": file.deletions,
+                    "changes": file.changes,
+                    "has_patch": bool(file.patch)  # Whether the file has a diff patch
+                }
+                file_data.append(data)
+                
             return file_data
         except GithubException as e:
             logger.error(f"Error fetching PR files: {e}")
             raise
 
-    def get_repo_content(self, owner: str, repo_name: str, file_path: str) -> str:
+    def get_repo_content(self, owner: str, repo_name: str, file_path: str, ref: str = None) -> str:
+        """
+        Fetches the content of a file from the repository.
+        
+        Args:
+            owner: Repository owner
+            repo_name: Repository name
+            file_path: Path to the file
+            ref: Reference (branch, commit SHA) to get the file from
+            
+        Returns:
+            Content of the file as a string
+        """
+        try:
+            repo = self.github.get_repo(f"{owner}/{repo_name}")
+            content_file = repo.get_contents(file_path)
+            return content_file.decoded_content.decode("utf-8")
+        except GithubException as e:
+            logger.error(f"Error fetching file content: {e}")
+            return ""  # Return empty string if file not found or other error
+
         """Fetches the content of a file from the repository."""
         try:
             repo = self.github.get_repo(f"{owner}/{repo_name}")
@@ -112,24 +203,29 @@ class GitHubClient:
         """Posts review comments to a pull request."""
         try:
             repo = self.github.get_repo(f"{owner}/{repo_name}")
+            logger.info(f"repo data {repo}")
             pr = repo.get_pull(pr_number)
+            commit = repo.get_commit(sha=pr.head.sha)
+            logger.info(f"commitdata {comments}")
             for comment_data in comments:
                 if "line" in comment_data:
                     pr.create_review_comment(
                         body=comment_data["body"],
                         path=comment_data["path"],
+                        commit=commit,
                         line=comment_data["line"],
                     )
                 elif "start_line" in comment_data and "end_line" in comment_data:
                     pr.create_review_comment(
                         body=comment_data["body"],
                         path=comment_data["path"],
+                        commit=commit,
                         start_line=comment_data["start_line"],
                         end_line=comment_data["end_line"],
                     )
                 else:
                     pr.create_review_comment(
-                        body=comment_data["body"], path=comment_data["path"]
+                        body=comment_data["body"], path=comment_data["path"],commit=commit,line=2,
                     )  # file level comment
             logger.info(
                 f"Successfully posted {len(comments)} review comments to {owner}/{repo_name}#{pr_number}"
@@ -243,6 +339,9 @@ def get_github_client() -> GitHubClient:
     token or a GitHub App installation token, depending on the environment variables.
     """
     github_token = os.getenv("GITHUB_TOKEN")
+    GITHUB_APP_ID = os.getenv("GITHUB_APP_ID")
+    GITHUB_PRIVATE_KEY = os.getenv("GITHUB_PRIVATE_KEY")
+    logger.info(f"git token is set {GITHUB_APP_ID and GITHUB_PRIVATE_KEY}")
     if GITHUB_APP_ID and GITHUB_PRIVATE_KEY:
         #  We are running as a GitHub App.  We need to get an installation token.
         #  The installation ID is per-organization.
@@ -264,6 +363,7 @@ def get_github_client() -> GitHubClient:
                     f"Installation not found for organization {org_name}"
                 ) #  Don't fall back.
     elif github_token:
+        logger.info("git token is set")
         return GitHubClient(github_token)  # Return client with personal access token
     else:
         raise ValueError(
@@ -377,7 +477,7 @@ class LLMPromptEngineer:
         self.config = config
 
     def create_prompt(
-        self, diff_text: str, file_contents: Dict[str, str], context: Dict[str, str], review_criteria: List[str]
+        self, diff_text: str, file_contents: str, context: Dict[str, str], review_criteria: List[str]
     ) -> str:
         """Creates a prompt for the LLM."""
         prompt = f"""
@@ -390,7 +490,9 @@ class LLMPromptEngineer:
         Review Criteria:
         {review_criteria}
         
-        Provide feedback, конструктивно, по пунктам, на русском языке.  Include the file name and line number.
+        path:
+        {file_contents}
+        Provide feedback.Include the file name and line number.
         """
         return prompt
 
@@ -455,7 +557,7 @@ class GeminiClient(LLMClient):
 
     def __init__(self, api_key: str):
         self.api_key = api_key
-        self.api_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent"  # Corrected URL
+        self.api_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"  # Corrected URL
         self.headers = {"Content-Type": "application/json"}
 
     def get_response(self, prompt: str, model_name: str) -> str:
@@ -471,12 +573,6 @@ class GeminiClient(LLMClient):
         """
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
-            "safetySettings": [  # Added safety settings as recommended by Gemini API
-                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_SEXUAL", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-            ],
         }
         params = {"key": self.api_key}
         try:
@@ -531,27 +627,23 @@ class ClaudeClient(LLMClient):
 # Review Comment Formatter
 class ReviewCommentFormatter:
     """Formats LLM responses into GitHub review comments."""
-
     def format_comments(self, llm_response: str) -> List[Dict]:
         """Formats the LLM response into a list of GitHub review comments."""
         comments = []
         lines = llm_response.splitlines()
-        for line in lines:
-            # Improved regex to handle file names with spaces and more robust line number parsing
-            match = re.match(r"([\w\s.-]+):(\d+):(.*)", line)
-            if match:
-                file_path, line_number, comment_text = match.groups()
-                comments.append(
-                    {
-                        "path": file_path.strip(),
-                        "line": int(line_number),  # Convert to integer
-                        "body": comment_text.strip(),
-                    }
-                )
-            elif line.strip():  # Add file-level comments
-                comments.append({"path": ".", "body": line.strip()})
-        return comments
+        current_file = None  # Store the last detected filename
 
+        for line in lines:
+            # Capture filenames inside backticks or Markdown-style headers
+            file_match = re.search(r"\*\*\d+\.\s+`([^`]+)`\*\*", line)
+            if file_match:
+                current_file = file_match.group(1).strip()  # Extract file name
+                continue  # Move to next line
+
+            if current_file and line.strip():  # Associate comments with extracted file
+                comments.append({"path": current_file, "body": line.strip()})
+
+        return comments
 
 
 # Main App Route
@@ -563,7 +655,7 @@ def github_webhook():
     payload = request.get_data()
     signature = request.headers.get("X-Hub-Signature-256")
     #  Retrieve the webhook secret from environment variable
-    webhook_secret = os.getenv("GITHUB_WEBHOOK_SECRET")
+    webhook_secret = os.getenv("GITHUB_WEBHOOK_SECRE")
 
     if webhook_secret:
         if not verify_github_signature(payload, signature, webhook_secret):
@@ -595,7 +687,7 @@ def github_webhook():
                 review_pr(owner, repo_name, pr_number)
                 return jsonify({"message": "Pull request review initiated"}), 202  # 202 Accepted
             except Exception as e:
-                logger.error(f"Error reviewing PR: {e}")
+                logger.error(f"Error reviewing PR: {traceback.format_exc()}")
                 return jsonify({"message": "Error reviewing PR"}), 500
 
         else:
@@ -608,13 +700,14 @@ def github_webhook():
 
 
 
-def review_pr(owner, repo_name, pr_number): # Removed Celery decorator
+def review_pr(owner, repo_name, pr_number): 
     start_time = time.time()
     logger.info(f"Starting code review for {owner}/{repo_name}#{pr_number}")
     github_client = get_github_client()  # Get the GitHub client instance
     try:
         # 1. Fetch the diff
         diff_text = github_client.get_pr_diff(owner, repo_name, pr_number)
+        logger.info(f"diff text {diff_text}")
         if not diff_text:
             logger.warning(
                 f"No diff found for {owner}/{repo_name}#{pr_number}.  Skipping review."
@@ -633,6 +726,7 @@ def review_pr(owner, repo_name, pr_number): # Removed Celery decorator
                 owner, repo_name, file_data["filename"]
             )
             if file_content:
+                logger.error(f'filecontent {file_data}')
                 file_contents[file_data["filename"]] = file_content
 
         # 4. Get context
@@ -642,11 +736,13 @@ def review_pr(owner, repo_name, pr_number): # Removed Celery decorator
         # 5. Generate LLM prompt
         prompt_engineer = LLMPromptEngineer(config)
         prompt = prompt_engineer.create_prompt(
-            diff_text, file_contents, context, config["review_criteria"]
+            diff_text, file_data["filename"], context, config["review_criteria"]
         )
 
         # 6. Get LLM response
         llm_client = None
+        LLM_PROVIDER=os.getenv("LLM_PROVIDER")
+        GEMINI_API_KEY=os.getenv("GEMINI_API_KEY")
         if LLM_PROVIDER == "openai":
             if not OPENAI_API_KEY:
                 raise ValueError("OPENAI_API_KEY is not set.")
@@ -661,16 +757,19 @@ def review_pr(owner, repo_name, pr_number): # Removed Celery decorator
             llm_client = ClaudeClient(CLAUDE_API_KEY)
         else:
             raise ValueError(f"Unsupported LLM provider: {LLM_PROVIDER}")
-        llm_response = llm_client.get_response(prompt, OPENAI_MODEL)  # Hardcoded gpt-4
+        #logger.error(f'prompts {prompt}')
+        llm_response = llm_client.get_response(prompt, 'gemini-pro')  # Hardcoded gpt-4
 
         # 7. Format comments
+        #logger.info(f'llmres {llm_response}')
         comment_formatter = ReviewCommentFormatter()
         comments = comment_formatter.format_comments(llm_response)
 
         # 8. Post comments (after authentication)
         #  Check if we are running as a GitHub App.  If so, we should have
         #  an installation ID in the environment.
-        if GITHUB_APP_ID and GITHUB_PRIVATE_KEY:
+        logger.info( f'app key {comments}')
+        if False and GITHUB_APP_ID and GITHUB_PRIVATE_KEY:
             org_name = payload_json["repository"]["owner"]["login"]  # needed for app authentication
             installation_id = github_client.get_installation_id(org_name)
             if installation_id:
