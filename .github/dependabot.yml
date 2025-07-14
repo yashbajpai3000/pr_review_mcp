@@ -1,0 +1,8 @@
+version: 2
+updates:
+  - package-ecosystem: "pub"         # For Flutter/Dart projects, using pub.
+    directory: "/"                   # Location of your pubspec.yaml.
+    target-branch: "main" # Replace with the branch you want to target.
+    schedule:
+      interval: "daily"              # Can be daily, weekly, or monthly.
+    open-pull-requests-limit: 5       # Optional: limit the number of open PRs.
